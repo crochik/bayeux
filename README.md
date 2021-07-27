@@ -9,7 +9,7 @@ package main
 import (
 	"fmt"
 
-	bay "github.com/zph/bayeux"
+	bay "github.com/mars/bayeux"
 )
 
 func Example() {
