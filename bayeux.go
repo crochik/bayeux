@@ -24,7 +24,8 @@ type TriggerEvent struct {
 			ReplayID    int       `json:"replayId"`
 			Type        string    `json:"type"`
 		} `json:"event"`
-		Object json.RawMessage `json:"sobject"`
+		Object  json.RawMessage `json:"sobject"`
+		Payload json.RawMessage `json:"payload"`
 	} `json:"data,omitempty"`
 	Channel    string `json:"channel"`
 	Successful bool   `json:"successful,omitempty"`
