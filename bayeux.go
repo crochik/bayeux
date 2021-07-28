@@ -159,7 +159,7 @@ func (b *Bayeux) subscribe(channel string, replay Replay) Subscription {
 								"ext": {
 									"replay": {"%s": "%d"}
 									}
-								}`, channel, b.id.clientID, channel, replay)
+								}`, channel, b.id.clientID, channel, replay.Value)
 	resp, err := b.call(handshake, b.creds.bayeuxUrl())
 	if err != nil {
 		logger.Fatalf("Cannot subscribe %s", err)
