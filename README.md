@@ -1,6 +1,15 @@
 # bayeux
 Bayeux Client Protocol implemented in Golang (as specified by Salesforce Realtime API)
 
+Forked from the seemingly unmaintained github.com/zph/bayeux.
+
+## Changes from github.com/zph/bayeux
+
+ - Switched from standard logger to logrus
+ - Added quit channel to Topic subscription
+ - Fixed bug where channels were leaked as topics were re-subscribed to
+ 
+
 # Usage
 See `examples/main.go`
 ```golang
@@ -9,7 +18,7 @@ package main
 import (
 	"fmt"
 
-	bay "github.com/zph/bayeux"
+	bay "github.com/deusnefum/bayeux"
 )
 
 func Example() {

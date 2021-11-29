@@ -3,17 +3,17 @@ package bayeux
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 // TriggerEvent describes an event received from Bayeaux Endpoint
@@ -87,7 +87,6 @@ type Bayeux struct {
 }
 
 var wg sync.WaitGroup
-var logger = log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lmicroseconds|log.Lshortfile)
 var status = Status{false, "", []string{}}
 
 // Call is the base function for making bayeux requests
@@ -95,7 +94,9 @@ func (b *Bayeux) call(body string, route string) (resp *http.Response, e error) 
 	var jsonStr = []byte(body)
 	req, err := http.NewRequest("POST", route, bytes.NewBuffer(jsonStr))
 	if err != nil {
-		logger.Fatalf("Bad Call request: %s", err)
+		logrus.WithFields(logrus.Fields{
+			"err": err,
+		}).Fatal("Bad Call request")
 	}
 	req.Header.Add("Content-Type", "application/json")
 	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", b.creds.AccessToken))
@@ -111,11 +112,16 @@ func (b *Bayeux) call(body string, route string) (resp *http.Response, e error) 
 	resp, err = client.Do(req)
 	if err == io.EOF {
 		// Right way to handle EOF?
-		logger.Printf("Bad bayeuxCall io.EOF: %s\n", err)
-		logger.Printf("Bad bayeuxCall Response: %+v\n", resp)
+		logrus.WithFields(logrus.Fields{
+			"err":      err,
+			"response": resp,
+		}).Warning("Bad bayeux Call")
+		e = err
 	} else if err != nil {
-		e = errors.New(fmt.Sprintf("Unknown error: %s", err))
-		logger.Printf("Bad unrecoverable Call: %s", err)
+		logrus.WithFields(logrus.Fields{
+			"err": err,
+		}).Error("Bad unrecoverable call")
+		e = err
 	}
 	return resp, e
 }
@@ -126,16 +132,18 @@ func (b *Bayeux) getClientID() error {
 	// Stub out clientIDAndCookies for first bayeuxCall
 	resp, err := b.call(handshake, b.creds.bayeuxUrl())
 	if err != nil {
-		logger.Fatalf("Cannot get client id %s", err)
+		logrus.WithFields(logrus.Fields{
+			"err": err,
+		}).Fatal("Cannot get client id")
 	}
 	defer resp.Body.Close()
 
 	decoder := json.NewDecoder(resp.Body)
 	var h BayeuxHandshake
 	if err := decoder.Decode(&h); err == io.EOF {
-		logger.Fatal(err)
+		logrus.Fatal(err)
 	} else if err != nil {
-		logger.Fatal(err)
+		logrus.Fatal(err)
 	}
 	creds := clientIDAndCookies{h[0].ClientID, resp.Cookies()}
 	b.id = creds
@@ -157,23 +165,33 @@ type Replay struct {
 	Value int
 }
 
+func contains(s []string, e string) bool {
+	for _, i := range s {
+		if e == i {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *Bayeux) subscribe(topic string, replay Replay) Subscription {
 	handshake := fmt.Sprintf(`{
 								"channel": "/meta/subscribe",
 								"subscription": "/topic/%s",
-								"clientId": "%s",
-								"ext": {
-									"replay": {"/topic/%s": "%d"}
-									}
+								"clientId": "%s"
 								}`, topic, b.id.clientID, topic, replay)
 	resp, err := b.call(handshake, b.creds.bayeuxUrl())
 	if err != nil {
-		logger.Fatalf("Cannot subscribe %s", err)
+		logrus.WithFields(logrus.Fields{
+			"err": err,
+		}).Fatal("Cannot subscribe")
 	}
 
 	defer resp.Body.Close()
 	if os.Getenv("DEBUG") != "" {
-		logger.Printf("Response: %+v", resp)
+		logrus.WithFields(logrus.Fields{
+			"response": resp,
+		}).Debug("Response")
 		// // Read the content
 		var b []byte
 		if resp.Body != nil {
@@ -183,59 +201,89 @@ func (b *Bayeux) subscribe(topic string, replay Replay) Subscription {
 		resp.Body = ioutil.NopCloser(bytes.NewBuffer(b))
 		// Use the content
 		s := string(b)
-		logger.Printf("Response Body: %s", s)
+		logrus.WithFields(logrus.Fields{
+			"response_body": s,
+		}).Debug("response body")
 	}
 
-	if resp.StatusCode > 299 {
-		logger.Fatalf("Received non 2XX response: HTTP_CODE %d", resp.StatusCode)
+	if resp.StatusCode >= 300 {
+		logrus.WithFields(logrus.Fields{
+			"respnse_code": resp.StatusCode,
+		}).Fatal("Received non 2XX response")
 	}
 	decoder := json.NewDecoder(resp.Body)
 	var h []Subscription
 	if err := decoder.Decode(&h); err == io.EOF {
-		logger.Fatal(err)
+		logrus.WithFields(logrus.Fields{
+			"err": err,
+		}).Fatal("Unexpected EOF decoding response body")
 	} else if err != nil {
-		logger.Fatal(err)
+		logrus.WithFields(logrus.Fields{
+			"err": err,
+		}).Fatal("error encountered decoding response body")
 	}
 	sub := h[0]
 	status.connected = sub.Successful
 	status.clientID = sub.ClientID
-	status.channels = append(status.channels, topic)
-	logger.Printf("Established connection(s): %+v", status)
+
+	if !contains(status.channels, topic) {
+		status.channels = append(status.channels, topic)
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"status": status,
+	}).Info("Established Connections")
 	return sub
 }
 
-func (b *Bayeux) connect() chan TriggerEvent {
-	out := make(chan TriggerEvent)
+func (b *Bayeux) connect(quitch chan struct{}) (out chan TriggerEvent) {
+	out = make(chan TriggerEvent)
 	go func() {
 		// TODO: add stop chan to bring this thing to halt
 		for {
 			postBody := fmt.Sprintf(`{"channel": "/meta/connect", "connectionType": "long-polling", "clientId": "%s"} `, b.id.clientID)
 			resp, err := b.call(postBody, b.creds.bayeuxUrl())
 			if err != nil {
-				logger.Printf("Cannot connect to bayeux %s", err)
-				logger.Println("Trying again...")
-			} else {
-				defer resp.Body.Close()
-				if os.Getenv("DEBUG") != "" {
-					// // Read the content
-					var b []byte
-					if resp.Body != nil {
-						b, _ = ioutil.ReadAll(resp.Body)
-					}
-					// Restore the io.ReadCloser to its original state
-					resp.Body = ioutil.NopCloser(bytes.NewBuffer(b))
-					// Use the content
-					s := string(b)
-					logger.Printf("Response Body: %s", s)
+				logrus.WithFields(logrus.Fields{
+					"value": err,
+				}).Info("Cannot connect to bayeux")
+				continue
+			}
+			defer resp.Body.Close()
+			if os.Getenv("DEBUG") != "" {
+				// // Read the content
+				var b []byte
+				if resp.Body != nil {
+					b, _ = ioutil.ReadAll(resp.Body)
+				} else {
+					logrus.WithFields(logrus.Fields{
+						"value": err,
+					}).Info("Response is null in body")
 				}
-				var x []TriggerEvent
-				decoder := json.NewDecoder(resp.Body)
-				if err := decoder.Decode(&x); err != nil && err != io.EOF {
-					logger.Fatal(err)
-				}
-				for _, e := range x {
-					out <- e
-				}
+				// Restore the io.ReadCloser to its original state
+				resp.Body = ioutil.NopCloser(bytes.NewBuffer(b))
+				// Use the content
+				s := string(b)
+				logrus.WithFields(logrus.Fields{
+					"value": s,
+				}).Info("Response body is")
+			}
+
+			var x []TriggerEvent
+			decoder := json.NewDecoder(resp.Body)
+			if err := decoder.Decode(&x); err != nil && err != io.EOF {
+				logrus.WithFields(logrus.Fields{
+					"value": err,
+				}).Error("Unable to decode")
+			}
+			select {
+			case <-quitch:
+				close(out)
+				return
+			default: // don't block
+			}
+			for _, e := range x {
+				out <- e
 			}
 		}
 	}()
@@ -255,16 +303,22 @@ func GetSalesforceCredentials() Credentials {
 		"password":      {password}}
 	res, err := http.PostForm(route, params)
 	if err != nil {
-		logger.Fatal(err)
+		logrus.WithFields(logrus.Fields{
+			"err": err,
+		}).Fatal("failed post to salesforce")
 	}
 	decoder := json.NewDecoder(res.Body)
 	var creds Credentials
 	if err := decoder.Decode(&creds); err == io.EOF {
-		logger.Fatal(err)
+		logrus.WithFields(logrus.Fields{
+			"err": err,
+		}).Fatal("Unexpected EOF decoding salesforce response")
 	} else if err != nil {
-		logger.Fatal(err)
+		logrus.WithFields(logrus.Fields{
+			"err": err,
+		}).Fatal("Error decoding salesforce response")
 	} else if creds.AccessToken == "" {
-		logger.Fatalf("Unable to fetch access token. Check credentials in environmental variables")
+		logrus.Fatal("Unable to fetch access token. Check credentials in environmental variables")
 	}
 	return creds
 }
@@ -272,20 +326,23 @@ func GetSalesforceCredentials() Credentials {
 func mustGetEnv(s string) string {
 	r := os.Getenv(s)
 	if r == "" {
-		panic(fmt.Sprintf("Could not fetch key %s", s))
+		logrus.WithFields(logrus.Fields{
+			"key": s,
+		}).Panic("Could not fetch environment variable")
 	}
 	return r
 }
 
-func (b *Bayeux) TopicToChannel(creds Credentials, topic string) chan TriggerEvent {
+func (b *Bayeux) TopicToChannel(creds Credentials, topic string) (chan TriggerEvent, chan struct{}) {
 	b.creds = creds
 	err := b.getClientID()
 	if err != nil {
-		log.Fatal("Unable to get bayeux ClientId")
+		logrus.Fatal("Unable to get bayeux ClientId")
 	}
 	r := Replay{ReplayAll}
 	b.subscribe(topic, r)
-	c := b.connect()
+	quitch := make(chan struct{})
+	c := b.connect(quitch)
 	wg.Add(1)
-	return c
+	return c, quitch
 }
