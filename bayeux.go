@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"time"
 )
@@ -25,15 +24,11 @@ type TriggerEvent struct {
 			ReplayID    int       `json:"replayId"`
 			Type        string    `json:"type"`
 		} `json:"event"`
-		Object json.RawMessage `json:"sobject"`
+		Object  json.RawMessage `json:"sobject"`
+		Payload json.RawMessage `json:"payload"`
 	} `json:"data,omitempty"`
 	Channel    string `json:"channel"`
 	Successful bool   `json:"successful,omitempty"`
-}
-
-func (t TriggerEvent) topic() string {
-	s := strings.Replace(t.Channel, "/topic/", "", 1)
-	return s
 }
 
 // Status is the state of success and subscribed channels
@@ -157,15 +152,15 @@ type Replay struct {
 	Value int
 }
 
-func (b *Bayeux) subscribe(topic string, replay Replay) Subscription {
+func (b *Bayeux) subscribe(channel string, replay Replay) Subscription {
 	handshake := fmt.Sprintf(`{
 								"channel": "/meta/subscribe",
-								"subscription": "/topic/%s",
+								"subscription": "%s",
 								"clientId": "%s",
 								"ext": {
-									"replay": {"/topic/%s": "%d"}
+									"replay": {"%s": "%d"}
 									}
-								}`, topic, b.id.clientID, topic, replay)
+								}`, channel, b.id.clientID, channel, replay.Value)
 	resp, err := b.call(handshake, b.creds.bayeuxUrl())
 	if err != nil {
 		logger.Fatalf("Cannot subscribe %s", err)
@@ -199,7 +194,7 @@ func (b *Bayeux) subscribe(topic string, replay Replay) Subscription {
 	sub := h[0]
 	status.connected = sub.Successful
 	status.clientID = sub.ClientID
-	status.channels = append(status.channels, topic)
+	status.channels = append(status.channels, channel)
 	logger.Printf("Established connection(s): %+v", status)
 	return sub
 }
@@ -277,14 +272,14 @@ func mustGetEnv(s string) string {
 	return r
 }
 
-func (b *Bayeux) TopicToChannel(creds Credentials, topic string) chan TriggerEvent {
+func (b *Bayeux) TopicToChannel(creds Credentials, channel string) chan TriggerEvent {
 	b.creds = creds
 	err := b.getClientID()
 	if err != nil {
 		log.Fatal("Unable to get bayeux ClientId")
 	}
 	r := Replay{ReplayAll}
-	b.subscribe(topic, r)
+	b.subscribe(channel, r)
 	c := b.connect()
 	wg.Add(1)
 	return c
